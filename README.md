@@ -1,2 +1,2 @@
 # NeuralNetwork
-Fully Connected Neural Network implementation using tensorflow
+Fully Connected Neural Network implementation using tensorflow.
