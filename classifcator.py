@@ -131,12 +131,12 @@ class ClassificatorNN:
         layers.append(self._output)
         if self._cpu_only:
             with tf.device('/cpu:{}'.format(self._cpu_number)):
-                with tf.Session(config=self._config) as sess:
-                    if seperate_validation:
-                        self._train_writer = tf.summary.FileWriter(self._ld + 'train/', sess.graph)
-                        self._val_writer = tf.summary.FileWriter(self._ld + 'val/', sess.graph)
-                    else:
-                        self._train_writer = tf.summary.FileWriter(self._ld, sess.graph)
+                sess = tf.InteractiveSession(config=self._config)
+                if seperate_validation:
+                    self._train_writer = tf.summary.FileWriter(self._ld + 'train/', sess.graph)
+                    self._val_writer = tf.summary.FileWriter(self._ld + 'val/', sess.graph)
+                else:
+                    self._train_writer = tf.summary.FileWriter(self._ld, sess.graph)
         else:
             with tf.device('/gpu:{}'.format(self._gpu_number)):
                 with tf.Session(config=self._config) as sess:
