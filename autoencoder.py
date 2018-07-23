@@ -327,6 +327,7 @@ class AutoEncoder:
                             break
                         learning_rate /= 10
                         decreased_learning_rate += 1
+                        epochs_not_improved = 0
                         if self._verbose:
                             print('new learning rate {}'.format(learning_rate))
                     else:
