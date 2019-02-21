@@ -1,4 +1,5 @@
 import os
+os.environ["CUDA_VISIBLE_DEVICES"]="-1"
 import tensorflow as tf
 from tensorflow.python import graph_util
 import numpy as np
@@ -27,7 +28,7 @@ def find_all_files(path, extensions=[], exclude=[]):
 
 def load_graph(graph_path, return_elements=[]):
     # Creates graph from saved graph_def.pb
-    with tf.gfile.FastGFile(graph_path, 'rb') as f:
+    with tf.gfile.GFile(graph_path, 'rb') as f:
         graph_def = tf.GraphDef()
         graph_def.ParseFromString(f.read())
         output_nodes = tf.import_graph_def(graph_def, return_elements=return_elements)
@@ -36,7 +37,7 @@ def load_graph(graph_path, return_elements=[]):
 
 def load_graph2(graph_path, inp, inp_name='/data', out_name='/prob:0', graph_name='model'):
     # Creates graph from saved graph_def.pb.
-    with tf.gfile.FastGFile(graph_path, 'rb') as f:
+    with tf.gfile.GFile(graph_path, 'rb') as f:
         graph_def = tf.GraphDef()
         graph_def.ParseFromString(f.read())
         tf.import_graph_def(graph_def, input_map={inp_name: inp}, name=graph_name)
