@@ -1,17 +1,18 @@
-import tensorflow as tf
-import numpy as np
-from sklearn.model_selection import train_test_split
-from utils import clear_start, next_batch, next_batch_shuffle, load_graph, freeze_save_graph
-from os import path
 import time
+from os import path
 
+import numpy as np
+import tensorflow as tf
+from sklearn.model_selection import train_test_split
 
-def length(a):
-    return tf.sqrt(tf.reduce_sum(tf.square(a), axis=1))
+from utils import (
+    load_graph,
+    clear_start,
+    next_batch,
+    freeze_save_graph,
+)
 
-
-def sim_matrix(a):
-    return tf.tensordot(a, tf.transpose(a), 1) / tf.multiply(length(a), length(a))
+tf.compat.v1.logging.set_verbosity(tf.compat.v1.logging.ERROR)
 
 
 class AutoEncoder:
@@ -28,34 +29,32 @@ class AutoEncoder:
         enable verbose output
     cpu_only: bool (default=True)
         use only cpu
-    cpu_number: int (default=0)
-        which cpu to use
     gpu_fraction : float (default=0.7)
         between (0.0-1.0) how much of the gpu memory allow to use, used if cpu_only is false
-    gpu_number: int (default=0)
-        which gpu to use
     log_dir : string (default='/tmp/log/')
         path to where save the logs of training (tensorboard directory)
     random_state : int
         set random state
     """
 
-    def __init__(self, structure=[10, 5, 10],
+    def __init__(self, structure=(10, 5, 10, ),
                  encoding_layer_index=1,
                  activation_fn=tf.nn.relu,
                  verbose=False,
-                 cpu_only=True, cpu_number=0,
-                 gpu_fraction=0.7, gpu_number=0,
+                 cpu_only=True,
+                 gpu_fraction=0.7,
                  log_dir='/tmp/log/',
                  random_state=None):
 
         self.structure = structure
         self.encoding_layer_index = encoding_layer_index
-        assert len(structure) > 2, 'the nerual network should have at least 3 layers: input, hidden, output'
-        assert self.structure[0] == self.structure[-1], 'The input and output dimensions should match'
-        assert ((0 < encoding_layer_index) and (encoding_layer_index < len(self.structure) - 1)), 'encoding layer ' \
-                                                                                                  'cannot be input or' \
-                                                                                                  ' output layer '
+        if len(structure) <= 2:
+            raise AssertionError('the nerual network should have at least 3 layers: input, hidden, output')
+        if self.structure[0] != self.structure[-1]:
+            raise AssertionError('the input and output dimensions should match')
+        if (0 >= encoding_layer_index) or (encoding_layer_index >= len(self.structure) - 1):
+            raise AssertionError('encoding layer should be between 0 and {} exlusively'.format(len(self.structure) - 1))
+
         if activation_fn is None:
             self.activation_fn = tf.identity
         else:
@@ -66,12 +65,12 @@ class AutoEncoder:
         self._cpu_only = cpu_only
 
         if cpu_only:
-            self._config = tf.ConfigProto(allow_soft_placement=True, device_count={'GPU': 0})
-            self._cpu_number = cpu_number
+            self._config = tf.compat.v1.ConfigProto(allow_soft_placement=True, device_count={'GPU': 0})
+            self._device = "/cpu:0"
         else:
-            self._gpu_number = gpu_number
-            self._config = tf.ConfigProto(allow_soft_placement=True)
+            self._config = tf.compat.v1.ConfigProto(allow_soft_placement=True)
             self._config.gpu_options.per_process_gpu_memory_fraction = gpu_fraction
+            self._device = "/gpu:0"
         self._random_state = None or random_state
         self._input_ph = None
         self._dropout_keep_rate = None
@@ -98,10 +97,7 @@ class AutoEncoder:
         self._start = None
         self._epoch = None
 
-    def define_loss(self, alpha, beta):
-        # sim_input = sim_matrix(self._input_ph)
-        # sim_encoded = sim_matrix(self._encoding)
-
+    def define_loss(self, beta=None):
         try:
             tf.summary.histogram('encoding', self._encoding)
             tf.summary.histogram('reconstructed', self._output)
@@ -110,80 +106,72 @@ class AutoEncoder:
             if self._verbose:
                 print(str(e))
 
+        if beta is None:
+            beta = 0
+
         with tf.name_scope('losses'):
-            self._loss1 = tf.multiply(tf.reduce_mean(tf.square(tf.subtract(self._input_ph, self._output))),
-                                      alpha, name='dist')
+            self._loss1 = tf.reduce_mean(tf.square(tf.subtract(self._input_ph, self._output)), name='dist')
             self._loss2 = tf.multiply(tf.add_n([tf.nn.l2_loss(v) for v in self._train_vars]),
                                       beta, name='l2_reg_loss')
-            # self._loss3 = tf.reduce_mean(tf.square(tf.subtract(sim_input, sim_encoded)), name='similarity')
-            # self._loss = tf.add_n((self._loss1, self._loss2, self._loss3), name='total_loss')
-            self._loss = tf.add_n((self._loss1, self._loss2), name='total_loss')
-            tf.summary.scalar('distance', self._loss1)
-            tf.summary.scalar('l2_loss', self._loss2)
-            # tf.summary.scalar('similarity', self._loss3)
-            tf.summary.scalar('total_loss', self._loss)
+            self._loss = tf.add(self._loss1, self._loss2, name='total_loss')
+            tf.compat.v1.summary.scalar('distance', self._loss1)
+            if beta:
+                tf.compat.v1.summary.scalar('l2_loss', self._loss2)
+            tf.compat.v1.summary.scalar('total_loss', self._loss)
 
     def _construct_nn(self, use_batch_norm, seperate_validation):
-        tf.reset_default_graph()
+        tf.compat.v1.reset_default_graph()
         clear_start([self._ld])
         if self._random_state is not None:
             if self._verbose:
                 print('seed is fixed to {}'.format(self._random_state))
-            tf.set_random_seed(self._random_state)
+            tf.compat.v1.set_random_seed(self._random_state)
             np.random.seed(self._random_state)
         layers = []
 
-        self._input_ph = tf.placeholder(tf.float32, shape=[None, self.structure[0]], name='input')
-        self._dropout_keep_rate = tf.placeholder_with_default(1., shape=None, name='keep_rate')
-        self._train_mode = tf.placeholder_with_default(False, shape=None, name='train_mode')
+        self._input_ph = tf.compat.v1.placeholder(tf.float32, shape=[None, self.structure[0]], name='input')
+        self._dropout_keep_rate = tf.compat.v1.placeholder_with_default(1., shape=None, name='keep_rate')
+        self._train_mode = tf.compat.v1.placeholder_with_default(False, shape=None, name='train_mode')
         layers.append(self._input_ph)
-        j = 1
-        with tf.variable_scope('autoencoder'):
-            for i, n_neurons in enumerate(self.structure[1:-1]):
 
-                if j == 1:
-                    x = tf.layers.dense(self._input_ph, n_neurons, name='hidden_%s' % j,
+        with tf.compat.v1.variable_scope('autoencoder'):
+            for i, n_neurons in enumerate(self.structure[1:-1], 1):
+
+                if i == 1:
+                    x = tf.layers.dense(self._input_ph, n_neurons, name='hidden_{}'.format(i),
                                         kernel_initializer=tf.truncated_normal_initializer())
                 else:
-                    x = tf.layers.dense(x, n_neurons, name='hidden_%s' % j,
+                    x = tf.layers.dense(x, n_neurons, name='hidden_{}'.format(i),
                                         kernel_initializer=tf.truncated_normal_initializer())
                 if use_batch_norm:
                     x = tf.layers.batch_normalization(x, axis=1, training=self._train_mode, scale=False)
                     layers.append(x)
                 x = self.activation_fn(x)
                 layers.append(x)
-                x = tf.layers.dropout(x, tf.subtract(1., self._dropout_keep_rate), name='dropout_%s' % j)
+                x = tf.layers.dropout(x, tf.subtract(1., self._dropout_keep_rate), name='dropout_{}'.format(i))
                 layers.append(x)
-                if j == self.encoding_layer_index:
+                if i == self.encoding_layer_index:
                     x = tf.identity(x, name='encoding')
                     self._encoding = x
-                j += 1
+
         self._output = tf.layers.dense(x, self.structure[-1], name='output',
                                        kernel_initializer=tf.truncated_normal_initializer())
-        self._labels = tf.placeholder(tf.float32, shape=[None, self.structure[-1]], name='label')
+        self._labels = tf.compat.v1.placeholder(tf.float32, shape=[None, self.structure[-1]], name='label')
         layers.append(self._output)
-        if self._cpu_only:
-            with tf.device('/cpu:{}'.format(self._cpu_number)):
-                sess = tf.Session(config=self._config)
-                if seperate_validation:
-                    self._train_writer = tf.summary.FileWriter(self._ld + 'train/', sess.graph)
-                    self._val_writer = tf.summary.FileWriter(self._ld + 'val/', sess.graph)
-                else:
-                    self._train_writer = tf.summary.FileWriter(self._ld, sess.graph)
+        with tf.device(self._device):
+            sess = tf.compat.v1.Session(config=self._config)
+
+        if seperate_validation:
+            self._train_writer = tf.compat.v1.summary.FileWriter(path.join(self._ld, 'train'), sess.graph)
+            self._val_writer = tf.compat.v1.summary.FileWriter(path.join(self._ld, 'val'))
         else:
-            with tf.device('/gpu:{}'.format(self._gpu_number)):
-                sess = tf.Session(config=self._config)
-                if seperate_validation:
-                    self._train_writer = tf.summary.FileWriter(self._ld + 'train/', sess.graph)
-                    self._val_writer = tf.summary.FileWriter(self._ld + 'val/')
-                else:
-                    self._train_writer = tf.summary.FileWriter(self._ld, sess.graph)
+            self._train_writer = tf.compat.v1.summary.FileWriter(self._ld, sess.graph)
         self._sess = sess
         self._network = layers
 
     def fit(self, X,
             seperate_validation=True, validation_ratio=0.2,
-            learning_rate=0.01, alpha=1., beta=0.0005,
+            learning_rate=0.01, beta=0.0005,
             n_epochs=10, batch_size=16,
             use_batch_norm=True,
             batch_norm_train=True,
@@ -198,16 +186,15 @@ class AutoEncoder:
         :param X: {array-like, sparse matrix}, shape (n_samples, n_features)
         Training vector, where n_samples is the number of samples and
         n_features is the number of features.
-        :param y: array-like, shape (n_samples,)
         Target vector relative to X.
-        :param loss_type: string, 'rmse' or 'crossentropy'
         :param seperate_validation: bool, seperate validation set from X
         :param validation_ratio: float, between (0.0-1.0) the ratio of seperated validation (default=0.2)
         :param learning_rate: float, the learning rate
         :param beta: float, L2 regularization parameter for the weights
-        :param batch_norm_train: bool, train batch_normalization parameters
         :param n_epochs: int, number of epochs to train the network
         :param batch_size: int, batch size
+        :param use_batch_norm: bool, whether or not to use batch normalization
+        :param batch_norm_train: bool, train batch_normalization parameters
         :param dropout_keep_rate: float, 0.6 would drop 40% of weights
         :param early_stopping_epochs: int, how many epochs to train without improvement (default=None)
         :param early_stopping_method: string, 'dlr' for multiplying learning rate by 0.1 or 'stop'
@@ -245,13 +232,13 @@ class AutoEncoder:
             self._train_vars = l2_optimizable_vars
 
             with tf.name_scope('losses'):
-                self.define_loss(alpha=alpha, beta=beta)
+                self.define_loss(beta=beta)
 
-            self._summary_op = tf.summary.merge_all()
-            update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS)
+            self._summary_op = tf.compat.v1.summary.merge_all()
+            update_ops = tf.compat.v1.get_collection(tf.compat.v1.GraphKeys.UPDATE_OPS)
             with tf.control_dependencies(update_ops):
-                self._train_op = tf.train.AdamOptimizer(learning_rate).minimize(self._loss)
-            self._sess.run(tf.global_variables_initializer())
+                self._train_op = tf.compat.v1.train.AdamOptimizer(learning_rate).minimize(self._loss)
+            self._sess.run(tf.compat.v1.global_variables_initializer())
 
         if not continue_fit:
             self._start = time.time()
@@ -267,15 +254,13 @@ class AutoEncoder:
                 self._epoch += 1
             else:
                 self._epoch = epoch
-            # batch_accuracies = []
             if self._verbose:
-                print('epoch %d started' % (self._epoch))
+                print('epoch {} started'.format(self._epoch))
 
             q = 0
             cummulative_loss = 0
-            # for j in tqdm(range(self._num_batches_train)):
             for j in range(self._num_batches_train):
-                train_inds, batch_inds = next_batch_shuffle(train_inds, batch_size)
+                train_inds, batch_inds = next_batch(train_inds, batch_size, shuffle=True)
                 batch_features = X[batch_inds]
 
                 _, train_summary, _loss = self._sess.run([self._train_op, self._summary_op, self._loss],
@@ -287,7 +272,8 @@ class AutoEncoder:
                 if seperate_validation:
                     val_inds, batch_inds = next_batch(val_inds, self._batch_size_val)
                     batch_features = val_X[batch_inds]
-                    assert len(batch_features) > 0, 'empty batch while validation'
+                    if len(batch_features) == 0:
+                        raise AssertionError('empty batch while validation')
                     val_summary, _loss = self._sess.run([self._summary_op, self._loss1],
                                                         feed_dict={self._input_ph: batch_features,
                                                                    self._labels: batch_features})
@@ -305,13 +291,13 @@ class AutoEncoder:
             if mean_loss < self.best_loss:
                 self.best_loss = mean_loss
                 if save_best_model:
-                    self.save_pb(self._ld + 'best.pb')
+                    self.save_model(path.join(self._ld, 'best.pb'))
                 epochs_not_improved = 0
             else:
                 epochs_not_improved += 1
 
             if self._verbose:
-                print('%d epoch mean loss: %f' % (self._epoch, mean_loss))
+                print('{} epoch mean loss: {}'.format(self._epoch, mean_loss))
             self.total_losses.append(mean_loss)
 
             if early_stopping_epochs is not None:
@@ -418,19 +404,12 @@ class AutoEncoder:
         predictions = np.squeeze(predictions)
         return predictions
 
-    def save_pb(self, path_to_pb):
+    def save_model(self, path_to_pb):
         freeze_save_graph(self._sess, path.basename(path_to_pb), 'output/BiasAdd', path.dirname(path_to_pb))
 
-    def load_pb(self, path_to_pb):
-        if self._cpu_only:
-            with tf.device('/cpu:{}'.format(self._cpu_number)):
-                self._input_ph, self._encoding, self._output = load_graph(
-                    path_to_pb, ['input:0', 'autoencoder/encoding:0', 'output/BiasAdd:0'])
-                self._sess = tf.Session(config=self._config)
-        else:
-            with tf.device('/gpu:{}'.format(self._gpu_number)):
-                self._input_ph, self._encoding, self._output = load_graph(
-                    path_to_pb, ['input:0', 'autoencoder/encoding:0', 'output/BiasAdd:0'])
-                self._sess = tf.Session(config=self._config)
-
+    def load_model(self, path_to_pb):
+        with tf.device(self._device):
+            self._input_ph, self._encoding, self._output = load_graph(
+                path_to_pb, ['input:0', 'autoencoder/encoding:0', 'output/BiasAdd:0'])
+            self._sess = tf.compat.v1.Session(config=self._config)
         return self

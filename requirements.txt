@@ -1,7 +1,5 @@
-tensorflow==1.12
+tensorflow-gpu==1.15
 jupyter
-numpy==1.14.3
-tqdm==4.19.8
-scikit-learn==0.19.1
-matplotlib==2.2.2
-
+tqdm==4.46
+scikit-learn==0.22
+matplotlib==3.1
